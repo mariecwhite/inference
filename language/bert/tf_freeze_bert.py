@@ -30,36 +30,6 @@ from tensorflow.python.framework import graph_util
 from tensorflow.python.tools import optimize_for_inference_lib
 from tensorflow.tools.graph_transforms import TransformGraph
 
-def save_model(fname, sess, graph=None):
-  def save(fname, graph_def):
-    pass
-    with tf.Graph().as_default() as g:
-        tf.import_graph_def(graph_def, name='')
-        graph_def = g.as_graph_def(add_shapes=True)
-    tf.train.write_graph(graph_def, ".", fname, as_text=False)
-
-  if graph == None:
-    graph_def = sess.graph_def
-  else:
-    graph_def = graph.as_graph_def(add_shapes=True)
-
-  input_nodes = ['IteratorGetNext:0', 'IteratorGetNext:1', 'IteratorGetNext:2']
-  output_nodes =  ['logits']
-
-  graph_def = graph_util.convert_variables_to_constants(
-      sess=sess,
-      input_graph_def=graph_def,
-      output_node_names=output_nodes)
-  graph_def = graph_util.remove_training_nodes(graph_def, protected_nodes=output_nodes)
-  graph_def = optimize_for_inference_lib.optimize_for_inference(graph_def, [], output_nodes, dtypes.float32.as_datatype_enum)
-
-  transforms = [
-    'remove_nodes(op=Identity, op=StopGradient)',
-    'fold_batch_norms',
-    'fold_old_batch_norms',
-  ]
-  graph_def = TransformGraph(graph_def, input_nodes, output_nodes, transforms)
-  save("build/data/bert_tf_v1_1_large_fp32_384_v2/model.pb", graph_def)
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids, use_one_hot_embeddings):
     """Creates a classification model."""
@@ -124,7 +94,53 @@ def main():
 
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
-        save_model("bert_large_nv.pb", sess)
+        graph_def = sess.graph_def
+
+        input_nodes = ['IteratorGetNext:0', 'IteratorGetNext:1', 'IteratorGetNext:2']
+        output_nodes =  ['logits']
+
+        graph_def = graph_util.convert_variables_to_constants(
+            sess=sess,
+            input_graph_def=graph_def,
+            output_node_names=output_nodes)
+        graph_def = graph_util.remove_training_nodes(graph_def, protected_nodes=output_nodes)
+        graph_def = optimize_for_inference_lib.optimize_for_inference(graph_def, [], output_nodes, dtypes.float32.as_datatype_enum)
+
+        transforms = [
+            'remove_nodes(op=Identity, op=StopGradient)',
+            'fold_batch_norms',
+            'fold_old_batch_norms',
+        ]
+        graph_def = TransformGraph(graph_def, input_nodes, output_nodes, transforms)
+
+        with tf.Graph().as_default() as g:
+            export_dir = "/tmp/saved_model/"
+            builder = tf.saved_model.builder.SavedModelBuilder(export_dir)
+            tf.import_graph_def(graph_def, name="")
+
+            input_ids = g.get_tensor_by_name('input_ids:0')
+            input_mask = g.get_tensor_by_name('input_mask:0')
+            segment_ids = g.get_tensor_by_name('segment_ids:0')
+
+            logits = g.get_tensor_by_name('logits:0')
+
+            sigs = {
+              tf.compat.v1.saved_model.signature_constants
+              .DEFAULT_SERVING_SIGNATURE_DEF_KEY:
+                  tf.compat.v1.saved_model.signature_def_utils.predict_signature_def(
+                      { "input_ids": input_ids,
+                        "input_mask": input_mask,
+                        "segment_ids": segment_ids },
+                      { "logits": logits })
+            }
+
+            builder.add_meta_graph_and_variables(sess,
+                                                 [tf.saved_model.SERVING],
+                                                 signature_def_map=sigs)
+            builder.save()
+
+
+
 
 if __name__ == "__main__":
     main()
